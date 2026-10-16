@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14161c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MusicSmith">
+  <title>MusicSmith</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>MusicSmith</h1>
+    <span id="rom-name"></span>
+    <div class="bar-actions">
+      <label class="btn">Open ROM<input type="file" id="rom-file" hidden></label>
+      <span class="when-open">
+        <button id="undo" disabled title="Undo (Ctrl+Z)">Undo</button>
+        <button id="redo" disabled title="Redo (Ctrl+Shift+Z)">Redo</button>
+        <button id="save" class="primary" title="Download the ROM with your music in it">Save ROM</button>
+        <button id="ips" title="Download only your changes, as an IPS patch">IPS patch</button>
+        <button id="close">Close</button>
+      </span>
+    </div>
+  </header>
+
+  <main id="welcome">
+    <label class="open-rom" id="drop">
+      <input type="file" id="rom-file-2" hidden>
+      <span class="open-title">Open a ROM</span>
+      <span class="open-hint">Tap to choose a ROM file, or drop it here</span>
+    </label>
+    <ol class="steps">
+      <li>Open your Dragon Warrior ROM. Every song and sound effect is listed, ready to play.</li>
+      <li>Export them as MIDI files and edit them in any music app, or edit the notes right here.</li>
+      <li>Import the edited MIDI files back.</li>
+      <li>Save the ROM, or an IPS patch you can share.</li>
+    </ol>
+    <p class="note">
+      Each game stores its music its own way, so MusicSmith has to know the game. It knows Dragon Warrior (NES) for
+      now. What you hear here is the game's own sound engine, so it's what the game will play.
+    </p>
+    <p class="note">Your ROM never leaves this device. Your work is kept in this browser until you close the ROM.</p>
+  </main>
+
+  <main id="work" hidden>
+    <aside id="side">
+      <details open id="lists">
+        <summary>Songs and sounds</summary>
+        <div class="list-head">Music</div>
+        <ul id="music" class="songs"></ul>
+        <div class="list-head">Sound effects</div>
+        <ul id="sfx" class="songs"></ul>
+      </details>
+      <details open>
+        <summary>Files</summary>
+        <div class="btn-row">
+          <button id="zip-export">Export all as MIDI</button>
+          <button id="zip-import">Import MIDI…</button>
+        </div>
+        <p class="hint">
+          Export gives you a ZIP with a MIDI file for every song and sound effect. Edit them, then import the ZIP (or
+          just the files you changed): each goes back where it came from.
+        </p>
+        <details class="more">
+          <summary>How the MIDI files work</summary>
+          <p class="hint">
+            One track per channel: Square 1, Square 2 and Triangle (sound effects: Square 2 and Noise). One note at a
+            time per track. Notes run from C2 to C8. Times line up with 24 ticks per quarter note.
+          </p>
+          <p class="hint">
+            Game settings are controller events on each track: CC20/21 instrument (duty, volume or fade), CC22/23
+            pitch sweep, CC24/25 note offset, CC111/110 loop start and end, CC113 a cue the game waits for. Keep
+            them and the song stays faithful; a track with none gets its volume from note velocities.
+          </p>
+        </details>
+      </details>
+      <details open>
+        <summary>Space</summary>
+        <div class="meter"><span id="meter-bar"></span></div>
+        <p id="meter-text" class="hint">No changes yet.</p>
+      </details>
+    </aside>
+
+    <section id="pane">
+      <div class="songbar">
+        <div id="song-info"><b id="song-name"></b><small id="song-sub"></small></div>
+        <div class="songbar-actions">
+          <button id="play" class="primary" title="Play (Space)">Play</button>
+          <button id="mid-export" title="Download this song as a MIDI file">Export MIDI</button>
+          <label class="btn" title="Replace this song with a MIDI file">Import MIDI<input type="file" id="mid-import" accept=".mid,.midi,.rmi,audio/midi" hidden></label>
+          <button id="wav" title="Download a recording">WAV</button>
+          <button id="revert" title="Put back the song from the ROM">Revert</button>
+        </div>
+      </div>
+      <div class="tools">
+        <div class="seg" id="lanes"></div>
+        <label class="inline">Grid
+          <select id="grid">
+            <option value="1">1 tick</option>
+            <option value="3">1/32</option>
+            <option value="6" selected>1/16</option>
+            <option value="8">1/8 triplet</option>
+            <option value="12">1/8</option>
+            <option value="24">1/4</option>
+          </select>
+        </label>
+        <span class="seg"><button id="zoom-out" title="Zoom out">−</button><button id="zoom-in" title="Zoom in">+</button></span>
+        <button id="delete" disabled title="Delete (Del)">Delete</button>
+      </div>
+      <div id="roll-wrap"><canvas id="roll"></canvas></div>
+      <div id="inspector"></div>
+    </section>
+  </main>
+
+  <div id="toast" hidden></div>
+  <input type="file" id="multi-import" accept=".mid,.midi,.zip,audio/midi,application/zip" multiple hidden>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

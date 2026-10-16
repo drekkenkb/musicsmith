@@ -25,8 +25,12 @@ const plainSongs = () => S.songs.map(s => JSON.parse(JSON.stringify(s)));
 async function openFile(file) {
   if (!file) return;
   const bytes = new Uint8Array(await file.arrayBuffer());
+  // Some engines find their music by running the game for a few seconds, so say so before the page goes still.
+  toast("Looking for the music…");
+  await new Promise(r => setTimeout(r, 50));
   try {
     start({ name: file.name, rom: bytes });
+    $("#toast").hidden = true;
     saveNow();
   } catch (e) { toast(e.message); }
 }

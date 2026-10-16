@@ -21,8 +21,9 @@
 //   noteControls(ctx, note), eventControls(ctx, ev), addable(ctx), newEvent(ctx, type, t), laneHint
 import dw from "./engine-dw.js";
 import nspc from "./engine-nspc.js";
+import smps from "./engine-smps.js";
 
-export const ENGINES = [dw, nspc];
+export const ENGINES = [dw, nspc, smps];
 
 // What the event strip and inspector call an event: the engine's own description, or a plain one.
 for (const e of ENGINES) {

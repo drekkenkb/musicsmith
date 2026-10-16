@@ -99,13 +99,14 @@ export function makeIPS(a, b) {
 }
 
 // 16-bit mono PCM.
-export function wav(samples, rate) {
-  const b = new ArrayBuffer(44 + samples.length * 2), dv = new DataView(b);
+export function wav(left, right, rate) {
+  const n = left.length, b = new ArrayBuffer(44 + n * 4), dv = new DataView(b);
   const str = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
-  str(0, "RIFF"); dv.setUint32(4, 36 + samples.length * 2, true); str(8, "WAVE");
-  str(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-  dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
-  str(36, "data"); dv.setUint32(40, samples.length * 2, true);
-  for (let i = 0; i < samples.length; i++) dv.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 32767, true);
+  str(0, "RIFF"); dv.setUint32(4, 36 + n * 4, true); str(8, "WAVE");
+  str(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 2, true);
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true);
+  str(36, "data"); dv.setUint32(40, n * 4, true);
+  const s16 = v => Math.max(-1, Math.min(1, v)) * 32767;
+  for (let i = 0; i < n; i++) { dv.setInt16(44 + i * 4, s16(left[i]), true); dv.setInt16(46 + i * 4, s16(right[i]), true); }
   return new Blob([b], { type: "audio/wav" });
 }

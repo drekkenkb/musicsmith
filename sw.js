@@ -1,6 +1,6 @@
 // Cache-first so the app works offline. build.sh stamps the cache name, so each
 // deploy starts a fresh cache and the old one is dropped.
-const CACHE = "musicsmith-64134844f462";
+const CACHE = "musicsmith-81a23a7d9d0f";
 const SHELL = ["./", "index.html", "app.js", "app.css", "dw.js", "apu.js", "midi.js", "roll.js", "files.js", "worker.js", "manifest.webmanifest", "icon.svg", "icon-180.png"];
 
 self.addEventListener("install", e => {

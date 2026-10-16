@@ -37,15 +37,16 @@
       <span class="open-hint">Tap to choose a ROM file, or drop it here</span>
     </label>
     <ol class="steps">
-      <li>Open your Dragon Warrior ROM. Every song and sound effect is listed, ready to play.</li>
+      <li>Open a ROM. Every song (and sound effect) is listed, ready to play.</li>
       <li>Export them as MIDI files and edit them in any music app, or edit the notes right here.</li>
       <li>Import the edited MIDI files back.</li>
       <li>Save the ROM, or an IPS patch you can share.</li>
     </ol>
     <p class="note">
-      Each game stores its music its own way, so MusicSmith has to know the game. It knows Dragon Warrior (NES) for
-      now. What you hear here is the game's own sound engine, so it's what the game will play.
+      Each game stores its music its own way, so MusicSmith has to know the game's sound engine. It knows:
     </p>
+    <ul class="note engines" id="engine-list"></ul>
+    <p class="note">What you hear is the game's own sound engine running, so it's what the game will play.</p>
     <p class="note">Your ROM never leaves this device. Your work is kept in this browser until you close the ROM.</p>
   </main>
 
@@ -53,9 +54,9 @@
     <aside id="side">
       <details open id="lists">
         <summary>Songs and sounds</summary>
-        <div class="list-head">Music</div>
+        <div class="list-head" id="music-head">Music</div>
         <ul id="music" class="songs"></ul>
-        <div class="list-head">Sound effects</div>
+        <div class="list-head" id="sfx-head">Sound effects</div>
         <ul id="sfx" class="songs"></ul>
       </details>
       <details open>
@@ -70,15 +71,7 @@
         </p>
         <details class="more">
           <summary>How the MIDI files work</summary>
-          <p class="hint">
-            One track per channel: Square 1, Square 2 and Triangle (sound effects: Square 2 and Noise). One note at a
-            time per track. Notes run from C2 to C8. Times line up with 24 ticks per quarter note.
-          </p>
-          <p class="hint">
-            Game settings are controller events on each track: CC20/21 instrument (duty, volume or fade), CC22/23
-            pitch sweep, CC24/25 note offset, CC111/110 loop start and end, CC113 a cue the game waits for. Keep
-            them and the song stays faithful; a track with none gets its volume from note velocities.
-          </p>
+          <div id="midi-help"></div>
         </details>
       </details>
       <details open>
@@ -102,14 +95,7 @@
       <div class="tools">
         <div class="seg" id="lanes"></div>
         <label class="inline">Grid
-          <select id="grid">
-            <option value="1">1 tick</option>
-            <option value="3">1/32</option>
-            <option value="6" selected>1/16</option>
-            <option value="8">1/8 triplet</option>
-            <option value="12">1/8</option>
-            <option value="24">1/4</option>
-          </select>
+          <select id="grid"></select>
         </label>
         <span class="seg"><button id="zoom-out" title="Zoom out">−</button><button id="zoom-in" title="Zoom in">+</button></span>
         <button id="delete" disabled title="Delete (Del)">Delete</button>

@@ -1,11 +1,12 @@
-import { locate, readSongs, previewMem, cloneSong, NOTE_BASE } from "./dw.js";
-import { Player, FRAME_HZ } from "./apu.js";
-import { songToMidi, midiToSong, writeMidi, readMidi, slotOf, usPerQuarter } from "./midi.js";
+import { detect, ENGINES } from "./engines.js";
+import { writeMidi, readMidi } from "./midi.js";
 import { zip, unzip, makeIPS, wav } from "./files.js";
-import { Roll, lanesOf, addEvent, tidy, noteName, EVENT_NAMES } from "./roll.js";
+import { Roll, addEvent, tidy } from "./roll.js";
+import { el, field, check, select, num, sep, hint, midiName } from "./ui.js";
 
 const $ = s => document.querySelector(s);
-const S = { rom: null, name: "", L: null, songs: [], orig: [], edited: new Set(), cur: 0, hist: [], fut: [] };
+const S = { rom: null, name: "", engine: null, L: null, songs: [], orig: [], edited: new Set(), cur: 0, hist: [], fut: [] };
+const cloneSong = s => JSON.parse(JSON.stringify(s));
 
 // ---------------------------------------------------------------- the background worker
 
@@ -31,17 +32,26 @@ async function openFile(file) {
 }
 
 function start(v) {
-  const L = locate(v.rom);
-  const orig = readSongs(v.rom, L);
+  const found = detect(v.rom);
+  if (!found) {
+    const known = [...new Set(ENGINES.map(e => `${e.name} (${e.system})`))].join(", ");
+    throw new Error(`MusicSmith doesn't know this game's sound engine. It knows: ${known}.`);
+  }
+  const { engine, L } = found;
+  const orig = engine.readSongs(v.rom, L);
   stop();
+  const keep = v.engine === engine.id || (!v.engine && engine.id === "dw");
   Object.assign(S, {
-    rom: v.rom, name: v.name, L, orig, songs: orig.map((s, i) => v.songs?.[i] || cloneSong(s)),
-    edited: new Set(v.edited || []), cur: v.cur ?? 1, hist: [], fut: [],
+    rom: v.rom, name: v.name, engine, L, orig, songs: orig.map((s, i) => (keep && v.songs?.[i]) || cloneSong(s)),
+    edited: new Set(keep ? v.edited || [] : []), cur: v.cur ?? orig.findIndex(s => !engine.hidden(s)), hist: [], fut: [],
   });
+  roll.engine = engine;
+  setGrid(engine.ppq);
+  $("#midi-help").replaceChildren(...engine.midiHelp.map(t => el("p", { className: "hint", textContent: t })));
   document.body.classList.add("open");
   $("#welcome").hidden = true;
   $("#work").hidden = false;
-  $("#rom-name").textContent = v.name;
+  $("#rom-name").textContent = `${v.name} · ${engine.name}`;
   renderList();
   openSong(Math.min(S.cur, S.songs.length - 1), v.lane);
   measure();
@@ -76,17 +86,19 @@ addEventListener("drop", e => {
 // ---------------------------------------------------------------- the song list
 
 const song = () => S.songs[S.cur];
-const fileName = (s, i) => {
-  const n = s.name.replace(/[^\w ()'-]+/g, "").trim();
-  return s.sfx ? `sfx ${String(s.id & 0x7f).padStart(2, "0")} ${n}.mid` : `${String(i).padStart(2, "0")} ${n}.mid`;
+const fileName = s => {
+  const n = s.name.replace(/[^\w ()'-]+/g, "").trim(), k = String(S.engine.number(s)).padStart(2, "0");
+  return s.sfx ? `sfx ${k} ${n}.mid` : `${k} ${n}.mid`;
 };
 
 function renderList() {
+  $("#sfx-head").hidden = !S.songs.some(s => s.sfx && !S.engine.hidden(s));
+  $("#music-head").hidden = !S.songs.some(s => !s.sfx && !S.engine.hidden(s));
   for (const [sel, sfx] of [["#music", false], ["#sfx", true]]) {
     const ul = $(sel);
     ul.replaceChildren();
     S.songs.forEach((s, i) => {
-      if (s.sfx !== sfx || (!sfx && s.id === 0)) return; // "no sound" is the engine's silence: not editable
+      if (s.sfx !== sfx || S.engine.hidden(s)) return;
       const li = document.createElement("li");
       li.dataset.i = i;
       li.className = (i === S.cur ? "current " : "") + (S.edited.has(i) ? "edited" : "");
@@ -119,7 +131,7 @@ const roll = new Roll($("#roll"), {
 function openSong(i, lane = 0) {
   S.cur = i;
   roll.setSong(song());
-  roll.lane = Math.min(lane, lanesOf(song()).length - 1);
+  roll.lane = Math.min(lane, roll.lanes.length - 1);
   roll.centerOnNotes();
   roll.draw();
   renderList();
@@ -133,12 +145,7 @@ function renderSongBar() {
   const s = song();
   $("#song-name").textContent = s.name;
   $("#lists > summary").textContent = phone.matches ? `Songs and sounds: ${s.name}` : "Songs and sounds";
-  const len = Math.max(...s.channels.filter(Boolean).map(c => c.end), 0);
-  const loops = s.channels.some(c => c && c.loop !== null);
-  const secs = s.sfx ? len / FRAME_HZ : null;
-  $("#song-sub").textContent = s.sfx
-    ? `Sound effect ${s.id & 0x7f} · ${secs.toFixed(2)} s${S.edited.has(S.cur) ? " · edited" : ""}`
-    : `Song ${s.id} · ${(len / 96).toFixed(1)} bars${loops ? ", loops" : ""}${S.edited.has(S.cur) ? " · edited" : ""}`;
+  $("#song-sub").textContent = S.engine.describe(s) + (S.edited.has(S.cur) ? " · edited" : "");
   $("#revert").disabled = !S.edited.has(S.cur);
   $("#play").textContent = playing?.i === S.cur ? "Stop" : "Play";
   $("#play").classList.toggle("playing", playing?.i === S.cur);
@@ -147,7 +154,7 @@ function renderSongBar() {
 function renderLanes() {
   const seg = $("#lanes");
   seg.replaceChildren();
-  lanesOf(song()).forEach((l, i) => {
+  roll.lanes.forEach((l, i) => {
     const b = document.createElement("button");
     b.setAttribute("aria-pressed", i === roll.lane);
     const dot = document.createElement("span");
@@ -220,33 +227,21 @@ function deleteSelection() {
   roll.select(null);
 }
 $("#delete").onclick = deleteSelection;
+// Grid choices in the engine's ticks: whatever divides a beat evenly.
+function setGrid(ppq) {
+  const opts = [[1, "1 tick"], [ppq / 8, "1/32"], [ppq / 4, "1/16"], [ppq / 3, "1/8 triplet"], [ppq / 2, "1/8"], [ppq, "1/4"]]
+    .filter(([v], i, a) => Number.isInteger(v) && v >= 1 && a.findIndex(x => x[0] === v) === i);
+  $("#grid").replaceChildren(...opts.map(([v, t]) => el("option", { value: v, textContent: t })));
+  const def = opts.find(o => o[0] === ppq / 4) || opts.at(-1);
+  $("#grid").value = def[0];
+  roll.grid = def[0];
+  roll.len = ppq / 2;
+}
 $("#grid").onchange = e => { roll.grid = +e.target.value; roll.len = Math.max(roll.grid, roll.len - roll.len % roll.grid || roll.grid); roll.draw(); };
 $("#zoom-in").onclick = () => roll.zoomBy(1.5);
 $("#zoom-out").onclick = () => roll.zoomBy(1 / 1.5);
 
 // ---------------------------------------------------------------- the inspector
-
-const hex = v => "$" + v.toString(16).toUpperCase().padStart(2, "0");
-const DUTIES = ["12.5%", "25%", "50%", "75%"];
-
-function el(tag, props = {}, ...kids) {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (k === "on") for (const [ev, f] of Object.entries(v)) e.addEventListener(ev, f);
-    else if (k in e) e[k] = v; else e.setAttribute(k, v);
-  }
-  e.append(...kids.filter(k => k !== null && k !== undefined));
-  return e;
-}
-const field = (label, input) => el("label", { className: "f" }, label, input);
-const check = (label, checked, onchange) => el("label", { className: "check" }, el("input", { type: "checkbox", checked, on: { change: e => onchange(e.target.checked) } }), label);
-const select = (opts, value, onchange) => {
-  const s = el("select", { on: { change: e => onchange(e.target.value) } }, ...opts.map(([v, t]) => el("option", { value: v, textContent: t })));
-  s.value = String(value);
-  return s;
-};
-const range = (min, max, value, oninput, onchange) => el("input", { type: "range", min, max, value, on: { input: e => oninput(+e.target.value), change: e => onchange(+e.target.value) } });
-const num = (min, max, value, onchange) => el("input", { type: "number", min, max, value, on: { change: e => { const v = Math.round(+e.target.value); if (Number.isFinite(v)) onchange(Math.max(min, Math.min(max, v))); } } });
 
 // The value an engine setting has at tick t on a channel: the last change at or before it.
 function valueAt(ch, type, t) {
@@ -254,46 +249,21 @@ function valueAt(ch, type, t) {
   for (const e of ch?.events || []) if (e.type === type && e.t <= t) v = e.v;
   return v;
 }
-// Sets an engine setting at tick t, changing the event there or adding one.
-function setAt(ci, type, t, v) {
-  edit(s => {
-    const ch = s.channels[ci];
-    const ev = ch?.events.find(e => e.type === type && e.t === t && !e.pre);
-    if (ev) ev.v = v; else addEvent(s, ci, { t, type, v });
-  }, true);
-}
 
-// Instrument controls for a byte: squares (DDLCVVVV), the triangle (CRRRRRRR) or noise (--LCVVVV).
-function instrumentControls(kind, v, set) {
-  const kids = [];
-  const live = el("small", { textContent: hex(v) });
-  if (kind === "tri") {
-    kids.push(check("Hold the note", !!(v & 0x80), on => set((v & 0x7f) | (on ? 0x80 : 0))));
-    kids.push(field(el("span", {}, "Length ", el("small", { textContent: `${v & 0x7f} (${((v & 0x7f) / 240).toFixed(2)} s, 0 = silent)` })),
-      range(0, 127, v & 0x7f, x => { kids.at(-1).querySelector("small").textContent = `${x} (${(x / 240).toFixed(2)} s)`; }, x => set((v & 0x80) | x))));
-    return kids;
-  }
-  const constant = !!(v & 0x10);
-  if (kind !== "noise") kids.push(field("Duty", select(DUTIES.map((d, i) => [i, d]), v >> 6, d => set((v & 0x3f) | (+d << 6)))));
-  kids.push(field("Volume", select([[1, "Steady"], [0, "Fades out"]], constant ? 1 : 0, c => set((v & 0xef) | (+c ? 0x10 : 0)))));
-  const label = constant ? "Level" : "Fade time";
-  const desc = x => (constant ? `${x}/15` : `${x} (${((x + 1) * 16 / 240).toFixed(2)} s)`);
-  const lab = el("small", { textContent: desc(v & 15) });
-  kids.push(field(el("span", {}, label + " ", lab), range(0, 15, v & 15, x => { lab.textContent = desc(x); }, x => set((v & 0xf0) | x))));
-  kids.push(check(constant ? "Hold the note" : "Repeat the fade", !!(v & 0x20), on => set((v & 0xdf) | (on ? 0x20 : 0))));
-  kids.push(field("Byte", live));
-  return kids;
-}
-
-function sweepControls(v, set) {
-  const on = !!(v & 0x80);
-  const kids = [check("Pitch sweep", on, x => set(x ? 0x80 | (v & 0x78) | (v & 7 || 3) : 0x08))];
-  if (on) {
-    kids.push(field("Direction", select([[0, "Down"], [1, "Up"]], (v >> 3) & 1, d => set((v & 0xf7) | (+d << 3)))));
-    kids.push(field("Speed (0 fastest)", num(0, 7, (v >> 4) & 7, x => set((v & 0x8f) | (x << 4)))));
-    kids.push(field("Step (1 biggest)", num(0, 7, v & 7, x => set((v & 0xf8) | x))));
-  }
-  return kids;
+// What an engine's controls get to work with. Their edits are each one undoable step.
+function inspectCtx() {
+  const s = song(), lane = roll.lanes[roll.lane], ch = s.channels[lane.ci];
+  return {
+    song: s, lane, ch, engine: S.engine, cursor: roll.cursor,
+    edit: fn => edit(fn, true),
+    valueAt: (type, t) => valueAt(ch, type, t),
+    // Sets an engine setting at tick t, changing the event there or adding one.
+    setAt: (type, t, v) => edit(x => {
+      const c = x.channels[lane.ci];
+      const ev = c?.events.find(e => e.type === type && e.t === t && !e.pre);
+      if (ev) ev.v = v; else addEvent(x, lane.ci, { t, type, v });
+    }, true),
+  };
 }
 
 function renderInspector() {
@@ -301,88 +271,65 @@ function renderInspector() {
   box.replaceChildren();
   $("#delete").disabled = !roll.sel;
   if (!S.rom) return;
-  const s = song(), lane = lanesOf(s)[roll.lane], ch = s.channels[lane.ci];
-  const kind = s.sfx ? (lane.type === "noise" ? "noise" : "sfx") : lane.ci === 2 ? "tri" : "sq";
+  const ctx = inspectCtx(), { song: s, lane, ch } = ctx, E = S.engine;
   const sel = roll.sel;
 
   if (sel?.kind === "note") {
-    const n = sel.ev, t = n.t;
-    const isNoise = n.type === "noise";
-    const pitch = isNoise ? `Noise ${n.v - 0xe0}` : noteName(n.key);
-    box.append(el("h3", {}, pitch, el("small", { textContent: `${lane.name} · tick ${t} · ${n.dur} long` })));
-    if (isNoise) box.append(field("Sound (0 highest)", num(0, 15, n.v - 0xe0, x => edit(() => { n.v = 0xe0 + x; }, true))));
-    else box.append(field("Note", select(Array.from({ length: 0xc8 - NOTE_BASE + 1 }, (_, i) => [NOTE_BASE + i, noteName(NOTE_BASE + i)]).reverse(), n.key, k => edit(() => { n.key = +k; }, true))));
-    box.append(field("Start (tick)", num(0, 99999, t, x => edit(() => { n.t = x; }, true))));
-    box.append(field("Length", num(1, 9999, n.dur, x => edit(() => { n.dur = x; roll.len = x; }, true))));
-    box.append(el("div", { className: "sep" }));
-    const ctype = isNoise ? "noisevol" : "ctrl0";
-    const cur = valueAt(ch, ctype, t);
-    box.append(el("h3", {}, "Instrument", el("small", { textContent: "from this note until the next change" })));
-    box.append(...instrumentControls(isNoise ? "noise" : kind, cur ?? (kind === "tri" ? 0xff : 0xbf), v => setAt(lane.ci, ctype, t, v)));
-    if (!isNoise && kind !== "tri") {
-      box.append(el("div", { className: "sep" }));
-      box.append(...sweepControls(valueAt(ch, "ctrl1", t) ?? 0x08, v => setAt(lane.ci, "ctrl1", t, v)));
+    const n = sel.ev, k = lane.key(n);
+    box.append(el("h3", {}, lane.label ? lane.label(k) : midiName(k), el("small", { textContent: `${lane.name} · tick ${n.t} · ${n.dur} long` })));
+    if (!lane.label) {
+      const keys = [];
+      for (let x = lane.hi; x >= lane.lo; x--) keys.push([x, midiName(x)]);
+      box.append(field("Note", select(keys, k, v => edit(() => lane.setKey(n, +v), true))));
     }
+    box.append(field("Start (tick)", num(0, 99999, n.t, x => edit(() => { n.t = x; }, true))));
+    box.append(field("Length", num(1, 9999, n.dur, x => edit(() => { n.dur = x; roll.len = x; }, true))));
+    box.append(...(E.noteControls?.(ctx, n) || []));
     return;
   }
 
   if (sel?.kind === "event") {
-    const e = sel.ev;
-    box.append(el("h3", {}, EVENT_NAMES[e.type], el("small", { textContent: `${lane.name} · tick ${e.t}${e.pre ? " · only the first time through" : ""}` })));
-    box.append(field("Tick", num(0, 99999, e.t, x => edit(() => { e.t = x; if (e.type === "sync") { const len = e.until - e.t; e.until = x + len; } }, true))));
-    const set = v => edit(() => { e.v = v; }, true);
-    if (e.type === "ctrl0") box.append(...instrumentControls(kind === "noise" ? "sfx" : kind, e.v, set));
-    else if (e.type === "noisevol") box.append(...instrumentControls("noise", e.v, set));
-    else if (e.type === "ctrl1") box.append(...sweepControls(e.v, set));
-    else if (e.type === "tempo") box.append(...tempoControls(e.v, set));
-    else if (e.type === "offset") {
-      box.append(field("Semitones", num(-128, 127, e.v > 127 ? e.v - 256 : e.v, x => set(x & 0xff))));
-      box.append(el("p", { className: "hint note", textContent: "Shifts the notes of every channel from here on. The dungeon floors share one tune this way. Notes here show the pitch you hear, so changing this moves where the notes land." }));
-    } else if (e.type === "sync") {
-      box.append(field("Until tick", num(e.t + 1, 99999, e.until, x => edit(() => { e.until = x; }, true))));
-      box.append(el("p", { className: "hint note", textContent: "The game waits for the music to get here (the intro waits for one before showing the story; jingles end on one). Keep it, or the game may wait forever." }));
-    }
-    box.append(el("div", { className: "sep" }), el("button", { textContent: "Delete event", on: { click: deleteSelection } }));
+    const e = sel.ev, info = E.eventInfo(e);
+    box.append(el("h3", {}, info.name, el("small", { textContent: `${lane.name} · tick ${e.t}${e.pre ? " · only the first time through" : ""}` })));
+    box.append(field("Tick", num(0, 99999, e.t, x => edit(() => { if (e.until !== undefined) e.until += x - e.t; e.t = x; }, true))));
+    box.append(...E.eventControls(ctx, e));
+    box.append(sep(), el("button", { textContent: "Delete event", on: { click: deleteSelection } }));
     return;
   }
 
-  // Nothing selected: the channel's loop and end, the song's tempo, and adding events.
+  // Nothing selected: the channel's loop and end, and adding events.
   box.append(el("h3", {}, lane.name, el("small", { textContent: ch ? "" : "silent in this song: tap the roll to add notes" })));
   if (ch) {
+    // Some engines loop the whole song at once: then the loop and end apply to every channel.
+    const chans = c => (E.sharedLoop ? c.channels.filter(Boolean) : [c.channels[lane.ci]]);
     if (!s.sfx) {
-      box.append(check("Loop", ch.loop !== null, on => edit(c => { c.channels[lane.ci].loop = on ? 0 : null; }, true)));
-      if (ch.loop !== null) box.append(field("Loop from (tick)", num(0, ch.end - 1, ch.loop, x => edit(c => { c.channels[lane.ci].loop = x; }, true))));
+      box.append(check("Loop", ch.loop !== null, on => edit(c => { for (const o of chans(c)) o.loop = on ? 0 : null; }, true)));
+      if (ch.loop !== null) box.append(field("Loop from (tick)", num(0, ch.end - 1, ch.loop, x => edit(c => { for (const o of chans(c)) o.loop = x; }, true))));
     }
-    box.append(field(ch.loop !== null ? "Loop end (tick)" : "Ends at (tick)", num(1, 99999, ch.end, x => edit(c => { c.channels[lane.ci].end = x; }, true))));
-    if (!s.sfx && S.songs.length) {
+    box.append(field(ch.loop !== null ? "Loop end (tick)" : "Ends at (tick)", num(1, 99999, ch.end, x => edit(c => { for (const o of chans(c)) o.end = x; }, true))));
+    if (!s.sfx && !E.sharedLoop) {
       box.append(el("button", {
         textContent: "Same for all channels", title: "Copy this channel's loop and end to the others",
         on: { click: () => edit(c => { for (const o of c.channels) if (o) { o.loop = ch.loop; o.end = ch.end; } }, true) },
       }));
     }
   }
-  box.append(el("div", { className: "sep" }));
-  const types = lane.type === "noise" ? ["noisevol"] : s.sfx ? ["ctrl0", "ctrl1"] : kind === "tri" ? ["ctrl0", "tempo", "offset", "sync"] : ["ctrl0", "ctrl1", "tempo", "offset", "sync"];
-  const pick = select(types.map(t => [t, EVENT_NAMES[t]]), types[0], () => {});
-  box.append(field(`Add at the red marker (tick ${roll.cursor})`, pick));
-  box.append(el("button", {
-    textContent: "Add", on: {
-      click: () => {
-        const type = pick.value, t = roll.cursor;
-        const v = type === "tempo" ? 120 : type === "offset" ? 0 : type === "ctrl1" ? 0x08 : type === "noisevol" ? 0x3f : kind === "tri" ? 0xff : 0xbf;
-        let made;
-        edit(c => { made = type === "sync" ? { t, type, until: t + 24 } : { t, type, v }; addEvent(c, lane.ci, made); }, true);
-        roll.select({ ev: made, kind: "event", lane: roll.lane });
+  const types = E.addable(ctx);
+  if (types.length) {
+    box.append(sep());
+    const pick = select(types.map(t => [t, E.eventInfo({ type: t }).name]), types[0], () => {});
+    box.append(field(`Add at the red marker (tick ${roll.cursor})`, pick));
+    box.append(el("button", {
+      textContent: "Add", on: {
+        click: () => {
+          const made = E.newEvent(ctx, pick.value, roll.cursor);
+          edit(c => addEvent(c, lane.ci, made), true);
+          roll.select({ ev: made, kind: "event", lane: roll.lane });
+        },
       },
-    },
-  }));
-  box.append(el("p", { className: "hint note", textContent: "Tap the roll to add a note, drag a note to move it, drag its right end to change its length. Drag empty space to scroll; tap the ruler to choose where Play starts. Events (instruments, tempo, cues) are in the strip at the bottom." }));
-}
-
-function tempoControls(v, set) {
-  const bpm = x => (60e6 / usPerQuarter(x)).toFixed(1);
-  const lab = el("small", { textContent: `≈ ${bpm(v)} BPM` });
-  return [field(el("span", {}, "Speed ", lab), range(1, 255, v, x => { lab.textContent = `≈ ${bpm(x)} BPM`; }, set)), field("Value", num(1, 255, v, set))];
+    }));
+  }
+  box.append(hint(E.laneHint));
 }
 
 // ---------------------------------------------------------------- playing
@@ -392,16 +339,14 @@ let ctx = null, playing = null;
 function play(i, from = 0) {
   stop();
   const s = S.songs[i];
-  let pv;
-  try { pv = previewMem(S.rom, S.L, s); } catch (e) { toast(e.message); return; }
   ctx ||= new (window.AudioContext || window.webkitAudioContext)();
   ctx.resume();
   try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {}
-  const p = new Player(pv.mem, S.L.notesTbl, ctx.sampleRate);
-  if (s.sfx) p.sfx(pv.ptrs[0]); else p.music(pv.ptrs, pv.silent);
+  let p;
+  try { p = S.engine.player(S.rom, S.L, s, ctx.sampleRate); } catch (e) { toast(e.message); return; }
   // Start partway in by running the engine silently up to there.
-  const clock = () => (s.sfx ? p.frames : p.ticks);
-  for (let f = 0; clock() < from && f < 200000; f++) p.frame();
+  p.seek(from);
+  const clock = () => p.clock();
   const gain = ctx.createGain();
   gain.gain.value = 0.8;
   gain.connect(ctx.destination);
@@ -410,16 +355,15 @@ function play(i, from = 0) {
   const pump = () => {
     if (playing !== pl) return;
     while (pl.next < ctx.currentTime + 0.3 && pl.end === null) {
-      const buf = ctx.createBuffer(1, 2048, ctx.sampleRate);
+      const buf = ctx.createBuffer(2, 2048, ctx.sampleRate);
       pl.marks.push([pl.next, clock()]);
-      p.render(buf.getChannelData(0));
+      p.render(buf.getChannelData(0), buf.getChannelData(1));
       const src = ctx.createBufferSource();
       src.buffer = buf; src.connect(gain); src.start(pl.next);
       pl.sources.push(src);
       if (pl.sources.length > 20) pl.sources.shift();
       pl.next += buf.duration;
-      const over = s.sfx ? !p.sfxActive() : !p.musicActive();
-      if (over) pl.end = pl.next + (s.sfx ? 0.2 : 0.8);
+      if (!p.active()) pl.end = pl.next + (s.sfx ? 0.2 : 0.8);
     }
     if (pl.end !== null && ctx.currentTime > pl.end) { stop(); return; }
   };
@@ -435,7 +379,7 @@ function play(i, from = 0) {
       let t = nx ? c0 + (nx[1] - c0) * (now - t0) / (nx[0] - t0) : c0;
       t = Math.max(0, t - 1);
       if (S.cur === i) {
-        const ch = s.channels[lanesOf(s)[roll.lane].ci] || s.channels.find(Boolean);
+        const ch = s.channels[roll.lanes[roll.lane].ci] || s.channels.find(Boolean);
         if (ch && ch.loop !== null && t >= ch.end) t = ch.loop + (t - ch.end) % (ch.end - ch.loop);
         roll.playhead = t;
         roll.scrollTo(t);
@@ -476,7 +420,7 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
 
-$("#mid-export").onclick = () => download(new Blob([writeMidi(songToMidi(song()))], { type: "audio/midi" }), fileName(song(), S.cur));
+$("#mid-export").onclick = () => download(new Blob([writeMidi(S.engine.toMidi(song()))], { type: "audio/midi" }), fileName(song()));
 
 $("#mid-import").onchange = async e => {
   const f = e.target.files[0];
@@ -484,12 +428,12 @@ $("#mid-import").onchange = async e => {
   if (!f) return;
   try {
     const midi = readMidi(new Uint8Array(await f.arrayBuffer()));
-    const from = slotOf(midi);
+    const from = S.engine.slotOf(midi);
     const s = song();
     if (from && from.sfx !== s.sfx) {
       if (!confirm(`That file is a ${from.sfx ? "sound effect" : "song"}, and ${s.name} is a ${s.sfx ? "sound effect" : "song"}. Import it anyway?`)) return;
     }
-    const { song: made, warnings } = midiToSong(midi, s);
+    const { song: made, warnings } = S.engine.fromMidi(midi, s);
     edit(cur => { Object.assign(cur, made); }, true);
     roll.select(null);
     roll.centerOnNotes();
@@ -498,31 +442,13 @@ $("#mid-import").onchange = async e => {
 };
 
 $("#zip-export").onclick = async () => {
-  const files = S.songs.map((s, i) => (!s.sfx && s.id === 0 ? null : {
-    name: (s.sfx ? "sfx/" : "music/") + fileName(s, i), data: writeMidi(songToMidi(s)),
+  const files = S.songs.map(s => (S.engine.hidden(s) ? null : {
+    name: (s.sfx ? "sfx/" : "music/") + fileName(s), data: writeMidi(S.engine.toMidi(s)),
   })).filter(Boolean);
-  files.push({ name: "README.txt", data: new TextEncoder().encode(README) });
+  files.push({ name: "README.txt", data: new TextEncoder().encode(S.engine.readme) });
   download(zip(files), `${baseName()} music.zip`);
 };
 
-const README = `MusicSmith: Dragon Warrior music as MIDI files
-
-music/ has every song, sfx/ every sound effect. Edit them in any MIDI editor, then import the ZIP (or just the files
-you changed) back into MusicSmith. Each file knows which song it is, so keep the text event in it, or the number at
-the start of the file name.
-
-Each track is one NES channel and plays one note at a time: Square 1, Square 2, Triangle (sound effects: Square 2 and
-Noise). Notes go from C2 to C8. 24 ticks per quarter note is the engine's timing; finer timing is rounded.
-
-Controller events hold what MIDI can't say:
-  CC20/CC21  instrument byte, high/low nibble (duty and flags / volume or fade time)
-  CC22/CC23  pitch sweep byte
-  CC24/CC25  note offset (shifts every channel)
-  CC15       this channel sets the tempo here (the tempo is the normal tempo event)
-  CC111      loop start      CC110  loop end (or end of the song)
-  CC113      cue the game waits for: 127 where it starts, 0 where it ends   CC114  cue after the end
-A track without CC20/CC21 gets its volume from note velocities.
-`;
 
 $("#zip-import").onclick = () => $("#multi-import").click();
 $("#multi-import").onchange = e => { importFiles([...e.target.files]); e.target.value = ""; };
@@ -541,15 +467,15 @@ async function importFiles(files) {
   for (const m of mids) {
     try {
       const midi = readMidi(m.data);
-      let slot = slotOf(midi);
+      let slot = S.engine.slotOf(midi);
       const base = m.name.split("/").pop();
       if (!slot) {
         const mm = base.match(/^(sfx[\s_-]*)?(\d+)/i);
         if (mm) slot = { sfx: !!mm[1] || /(^|\/)sfx\//i.test(m.name), index: +mm[2] };
       }
-      const i = slot ? S.songs.findIndex(s => s.sfx === slot.sfx && (s.id & 0x7f) === slot.index) : -1;
-      if (i < 0 || (!S.songs[i].sfx && S.songs[i].id === 0)) { skipped.push(base); continue; }
-      const { song: made, warnings } = midiToSong(midi, S.songs[i]);
+      const i = slot ? S.songs.findIndex(s => s.sfx === slot.sfx && S.engine.number(s) === slot.index) : -1;
+      if (i < 0 || S.engine.hidden(S.songs[i])) { skipped.push(base); continue; }
+      const { song: made, warnings } = S.engine.fromMidi(midi, S.songs[i]);
       // Files that didn't change (re-exported untouched) are left alone.
       if (JSON.stringify(made.channels) === JSON.stringify(S.songs[i].channels)) continue;
       S.hist.push({ i, song: cloneSong(S.songs[i]), edited: S.edited.has(i) });
@@ -572,15 +498,15 @@ $("#wav").onclick = async () => {
   const s = song();
   toast("Recording…");
   try {
-    const r = await work({ cmd: "wav", rom: S.rom, L: S.L, song: JSON.parse(JSON.stringify(s)), rate: 44100 });
-    download(wav(r.samples, 44100), fileName(s, S.cur).replace(/\.mid$/, ".wav"));
-    toast(`Recorded ${s.name} (${(r.samples.length / 44100).toFixed(1)} s).`);
+    const r = await work({ cmd: "wav", engine: S.engine.id, rom: S.rom, L: S.L, song: JSON.parse(JSON.stringify(s)), rate: 44100 });
+    download(wav(r.left, r.right, 44100), fileName(s).replace(/\.mid$/, ".wav"));
+    toast(`Recorded ${s.name} (${(r.left.length / 44100).toFixed(1)} s).`);
   } catch (e) { toast(e.message); }
 };
 
 async function built() {
   if (!S.edited.size) return S.rom;
-  const r = await work({ cmd: "build", rom: S.rom, L: S.L, songs: plainSongs() });
+  const r = await work({ cmd: "build", engine: S.engine.id, rom: S.rom, L: S.L, songs: plainSongs(), edited: [...S.edited] });
   showMeter(r.used, r.room);
   return r.rom;
 }
@@ -588,7 +514,7 @@ async function built() {
 $("#save").onclick = async () => {
   try {
     const out = await built();
-    download(new Blob([out]), `${baseName()} (MusicSmith).nes`);
+    download(new Blob([out]), `${baseName()} (MusicSmith).${S.engine.ext}`);
     toast(S.edited.size ? "Saved. Your music is in the new ROM." : "Nothing has changed yet, so that's the original ROM.");
   } catch (e) { toast(e.message); }
 };
@@ -609,7 +535,7 @@ function measureSoon() { clearTimeout(measureTimer); measureTimer = setTimeout(m
 async function measure() {
   if (!S.rom) return;
   try {
-    const r = await work({ cmd: "build", rom: S.rom, L: S.L, songs: plainSongs(), measure: true });
+    const r = await work({ cmd: "build", engine: S.engine.id, rom: S.rom, L: S.L, songs: plainSongs(), edited: [...S.edited], measure: true });
     showMeter(r.used, r.room);
   } catch (e) {
     $("#meter-bar").style.width = "100%";
@@ -622,7 +548,7 @@ function showMeter(used, room) {
   $("#meter-bar").style.width = `${Math.min(100, used / room * 100)}%`;
   $("#meter-bar").classList.toggle("full", used > room);
   $("#meter-text").classList.remove("err");
-  $("#meter-text").textContent = `${used} of ${room} bytes used: room for about ${room - used} more bytes of music (a note is 1-2).`;
+  $("#meter-text").textContent = S.engine.spaceText(used, room);
 }
 
 // ---------------------------------------------------------------- keys
@@ -636,13 +562,12 @@ addEventListener("keydown", e => {
   else if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); deleteSelection(); }
   else if (roll.sel?.kind === "note" && e.key.startsWith("Arrow")) {
     e.preventDefault();
-    const n = roll.sel.ev, noise = n.type === "noise";
+    const n = roll.sel.ev, lane = roll.lanes[roll.lane];
     edit(() => {
       if (e.key === "ArrowLeft") n.t = Math.max(0, n.t - roll.grid);
       if (e.key === "ArrowRight") n.t += roll.grid;
       const d = e.key === "ArrowUp" ? (e.shiftKey ? 12 : 1) : e.key === "ArrowDown" ? (e.shiftKey ? -12 : -1) : 0;
-      if (noise) n.v = Math.max(0xe0, Math.min(0xef, n.v - d));
-      else n.key = Math.max(NOTE_BASE, Math.min(0xc8, n.key + d));
+      if (d) lane.setKey(n, Math.max(lane.lo, Math.min(lane.hi, lane.key(n) + d)));
     }, true);
   }
 });
@@ -674,7 +599,7 @@ function saveSoon() { clearTimeout(saveTimer); if (S.rom) saveTimer = setTimeout
 function saveNow() {
   if (!S.rom) return;
   idbPut("session", {
-    name: S.name, rom: S.rom, cur: S.cur, lane: roll.lane, edited: [...S.edited],
+    name: S.name, rom: S.rom, engine: S.engine.id, cur: S.cur, lane: roll.lane, edited: [...S.edited],
     songs: S.songs.map((s, i) => (S.edited.has(i) ? JSON.parse(JSON.stringify(s)) : null)),
   }).catch(() => {});
 }
@@ -689,6 +614,8 @@ function toast(msg) {
   toastTimer = setTimeout(() => { t.hidden = true; }, 2500 + msg.length * 40);
 }
 $("#toast").onclick = () => { $("#toast").hidden = true; };
+
+$("#engine-list").replaceChildren(...ENGINES.map(e => el("li", {}, el("b", { textContent: `${e.name} (${e.system})` }), e.examples ? `: ${e.examples}` : "")));
 
 // On a phone the side panel sits above the editor, so it starts folded up.
 const phone = matchMedia("(max-width: 760px)");

@@ -1,21 +1,9 @@
 // The piano roll: draws a song's channels and lets you add, move, resize and delete the notes of one of them, and
 // pick the engine events (instrument changes, tempo...) shown in the strip along the bottom.
 
-import { NOTE_BASE } from "./dw.js";
+import { midiName } from "./ui.js";
 
-export const COLORS = ["#ffd43b", "#4dabf7", "#ff6b6b", "#8ce99a"];
-const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-export const noteName = key => { const m = key - NOTE_BASE + 36; return NAMES[m % 12] + (Math.floor(m / 12) - 1); };
-const MARK = { ctrl0: "I", ctrl1: "S", tempo: "T", offset: "O", sync: "C", noisevol: "V" };
-export const EVENT_NAMES = { ctrl0: "Instrument", ctrl1: "Sweep", tempo: "Tempo", offset: "Note offset", sync: "Cue", noisevol: "Noise volume" };
-
-const KEYS_W = 44, RULER_H = 22, STRIP_H = 30, LO = NOTE_BASE, HI = 0xc8;
-
-// The lanes a song has: a music song's three channels, or an effect's square and noise parts of one stream.
-export function lanesOf(song) {
-  if (song.sfx) return [{ ci: 0, type: "note", name: "Square 2", color: COLORS[1] }, { ci: 0, type: "noise", name: "Noise", color: COLORS[3] }];
-  return ["Square 1", "Square 2", "Triangle"].map((name, ci) => ({ ci, type: "note", name, color: COLORS[ci] }));
-}
+const KEYS_W = 44, RULER_H = 22, STRIP_H = 30;
 
 export class Roll {
   constructor(canvas, cb) {
@@ -28,6 +16,7 @@ export class Roll {
     this.grid = 6;
     this.len = 12; // the length a new note gets
     this.song = null;
+    this.engine = null; // see engines.js: lanes, key range, event names
     this.lane = 0;
     this.sel = null; // { ev, kind: "note" | "event" }
     this.playhead = null;
@@ -53,7 +42,7 @@ export class Roll {
   }
 
   setSong(song, keepView) {
-    const changed = !this.song || this.song.id !== song.id;
+    const changed = !this.song || this.song.id !== song.id || this.song.sfx !== song.sfx;
     this.song = song;
     if (this.sel && !this.contains(this.sel.ev)) this.select(null);
     if (changed && !keepView) {
@@ -66,15 +55,18 @@ export class Roll {
   }
 
   contains(ev) { return this.song.channels.some(ch => ch?.events.includes(ev)); }
-  get lanes() { return lanesOf(this.song); }
+  get lanes() { return this.engine.lanes(this.song); }
+  get lo() { return this.engine.keyRange[0]; }
+  get hi() { return this.engine.keyRange[1]; }
+  get bar() { return this.engine.ppq * 4; }
   get rollH() { return this.h - RULER_H - STRIP_H; }
-  rows() { return HI - LO + 1; }
-  rowY(key) { return RULER_H + (HI - key) * this.rowH - this.sy; }
-  keyAt(y) { return Math.max(LO, Math.min(HI, HI - Math.floor((y - RULER_H + this.sy) / this.rowH))); }
+  rows() { return this.hi - this.lo + 1; }
+  rowY(key) { return RULER_H + (this.hi - key) * this.rowH - this.sy; }
+  keyAt(y) { return Math.max(this.lo, Math.min(this.hi, this.hi - Math.floor((y - RULER_H + this.sy) / this.rowH))); }
   x(t) { return KEYS_W + t * this.zoom - this.sx; }
   tickAt(x) { return Math.max(0, (x - KEYS_W + this.sx) / this.zoom); }
   snap(t) { return Math.max(0, Math.round(t / this.grid) * this.grid); }
-  length() { return Math.max(96, ...this.song.channels.filter(Boolean).map(c => c.end)); }
+  length() { return Math.max(this.bar, ...this.song.channels.filter(Boolean).map(c => c.end)); }
 
   clamp() {
     if (!this.song) return;
@@ -87,22 +79,21 @@ export class Roll {
   centerOnNotes() {
     const keys = this.laneNotes(this.lane).map(n => n.key);
     const all = keys.length ? keys : this.lanes.flatMap((_, i) => this.laneNotes(i)).map(n => n.key);
-    const mid = all.length ? (Math.min(...all) + Math.max(...all)) / 2 : 0x98;
-    this.sy = (HI - mid) * this.rowH - this.rollH / 2;
+    const mid = all.length ? (Math.min(...all) + Math.max(...all)) / 2 : 60;
+    this.sy = (this.hi - mid) * this.rowH - this.rollH / 2;
     this.clamp();
   }
 
-  // Notes of a lane, as { ev, key } (noise notes sit on the keyboard at C2 and up, as in the MIDI files).
+  // Notes of a lane, as { ev, key }: the key is a MIDI note number, as the lane maps it.
   laneNotes(i) {
     const l = this.lanes[i], ch = this.song.channels[l.ci];
     if (!ch) return [];
-    return ch.events.filter(e => e.type === l.type).map(ev => ({ ev, key: l.type === "noise" ? NOTE_BASE + (ev.v - 0xe0) : ev.key }));
+    return ch.events.filter(e => e.type === l.type).map(ev => ({ ev, key: l.key(ev) }));
   }
   laneEvents(i) {
     const l = this.lanes[i], ch = this.song.channels[l.ci];
     if (!ch) return [];
-    const mine = l.type === "noise" ? ["noisevol"] : ["ctrl0", "ctrl1", "tempo", "offset", "sync"];
-    return ch.events.filter(e => mine.includes(e.type));
+    return ch.events.filter(e => l.events.includes(e.type));
   }
 
   select(sel) {
@@ -117,13 +108,13 @@ export class Roll {
     c.fillStyle = "#0b0c10"; c.fillRect(0, 0, w, h);
     const t0 = Math.floor(this.tickAt(KEYS_W)), t1 = Math.ceil(this.tickAt(w));
     // rows
-    for (let k = LO; k <= HI; k++) {
+    for (let k = this.lo; k <= this.hi; k++) {
       const y = this.rowY(k);
       if (y + this.rowH < RULER_H || y > RULER_H + this.rollH) continue;
-      const black = [1, 3, 6, 8, 10].includes((k - LO) % 12);
+      const black = [1, 3, 6, 8, 10].includes(k % 12);
       c.fillStyle = black ? "#101218" : "#151821";
       c.fillRect(KEYS_W, y, w - KEYS_W, this.rowH);
-      if ((k - LO) % 12 === 0) { c.fillStyle = "#262a34"; c.fillRect(KEYS_W, y + this.rowH - 1, w - KEYS_W, 1); }
+      if (k % 12 === 0) { c.fillStyle = "#262a34"; c.fillRect(KEYS_W, y + this.rowH - 1, w - KEYS_W, 1); }
     }
     // loop and end of the current lane's channel
     const ch = this.song.channels[this.lanes[this.lane].ci];
@@ -132,10 +123,11 @@ export class Roll {
       c.fillStyle = "rgba(0,0,0,.45)"; c.fillRect(this.x(ch.end), RULER_H, w, this.rollH);
     }
     // grid
-    const step = this.grid * z < 6 ? (24 * z < 6 ? 96 : 24) : this.grid;
+    const beat = this.engine.ppq, bar = this.bar;
+    const step = this.grid * z < 6 ? (beat * z < 6 ? bar : beat) : this.grid;
     for (let t = Math.floor(t0 / step) * step; t <= t1; t += step) {
       const x = Math.round(this.x(t)) + 0.5;
-      c.fillStyle = t % 96 === 0 ? "#3a3f4d" : t % 24 === 0 ? "#272b36" : "#1a1d25";
+      c.fillStyle = t % bar === 0 ? "#3a3f4d" : t % beat === 0 ? "#272b36" : "#1a1d25";
       c.fillRect(x, RULER_H, 1, this.rollH);
     }
     // notes: the other lanes dimmed, then the current one
@@ -156,28 +148,28 @@ export class Roll {
     // keys
     c.fillStyle = "#1e2129"; c.fillRect(0, RULER_H, KEYS_W, this.rollH);
     c.font = "10px ui-monospace, monospace"; c.textBaseline = "middle";
-    const noise = this.lanes[this.lane].type === "noise";
-    for (let k = LO; k <= HI; k++) {
+    const lane = this.lanes[this.lane];
+    for (let k = this.lo; k <= this.hi; k++) {
       const y = this.rowY(k);
       if (y + this.rowH < RULER_H || y > RULER_H + this.rollH) continue;
-      const black = [1, 3, 6, 8, 10].includes((k - LO) % 12);
-      if (noise) {
-        if (k - LO > 21) continue;
-        c.fillStyle = "#9aa0ad"; c.fillText(`N${k - LO}`, 6, y + this.rowH / 2);
+      const black = [1, 3, 6, 8, 10].includes(k % 12);
+      if (lane.label) {
+        if (k < lane.lo || k > lane.hi) continue;
+        c.fillStyle = "#9aa0ad"; c.fillText(lane.label(k), 6, y + this.rowH / 2);
         continue;
       }
       if (black) { c.fillStyle = "#0b0c10"; c.fillRect(0, y, KEYS_W * 0.6, this.rowH); }
-      if ((k - LO) % 12 === 0) { c.fillStyle = "#9aa0ad"; c.fillText(noteName(k), 6, y + this.rowH / 2); }
+      if (k % 12 === 0) { c.fillStyle = "#9aa0ad"; c.fillText(midiName(k), 6, y + this.rowH / 2); }
     }
     // ruler
     c.fillStyle = "#1e2129"; c.fillRect(0, 0, w, RULER_H);
     c.fillStyle = "#9aa0ad";
-    const barStep = 96 * z < 40 ? 384 : 96;
+    const barStep = bar * z < 40 ? bar * 4 : bar;
     for (let t = Math.floor(t0 / barStep) * barStep; t <= t1; t += barStep) {
       const x = this.x(t);
       if (x < KEYS_W - 1) continue;
       c.fillRect(x, 12, 1, 10);
-      c.fillText(String(t / 96 + 1), x + 3, 9);
+      c.fillText(String(t / bar + 1), x + 3, 9);
     }
     c.fillStyle = "#e5484d";
     const cx = this.x(this.cursor);
@@ -193,10 +185,11 @@ export class Roll {
       if (x < KEYS_W - 15 || x > w) continue;
       const selected = this.sel?.ev === ev;
       // Markers hang to the right of their tick, so one at the very start isn't hidden behind the keys.
-      c.fillStyle = selected ? "#ffd43b" : ev.type === "sync" ? "#e5484d" : "#3a3f4d";
+      const info = this.engine.eventInfo(ev);
+      c.fillStyle = selected ? "#ffd43b" : info.alert ? "#e5484d" : "#3a3f4d";
       c.fillRect(x, sy + 5, 15, STRIP_H - 10);
       c.fillStyle = selected ? "#14161c" : "#e9ebf0";
-      c.fillText(MARK[ev.type], x + 7.5, sy + STRIP_H / 2 + 1);
+      c.fillText(info.mark, x + 7.5, sy + STRIP_H / 2 + 1);
     }
     c.restore();
     c.textAlign = "start";
@@ -279,12 +272,8 @@ export class Roll {
     const lane = this.lanes[this.lane];
     if (d.mode === "move") {
       const t = this.snap(d.t0 + dx / this.zoom);
-      let key = d.key0 + Math.round(-dy / this.rowH);
-      key = lane.type === "noise" ? Math.max(LO, Math.min(LO + 15, key)) : Math.max(LO, Math.min(HI, key));
-      this.cb.edit(() => {
-        d.ev.t = t;
-        if (lane.type === "noise") d.ev.v = 0xe0 + (key - LO); else d.ev.key = key;
-      }, !d.started);
+      const key = Math.max(lane.lo, Math.min(lane.hi, d.key0 + Math.round(-dy / this.rowH)));
+      this.cb.edit(() => { d.ev.t = t; lane.setKey(d.ev, key); }, !d.started);
     } else {
       const end = Math.max(d.t0 + 1, this.snapEnd(d.t0 + d.dur0 + dx / this.zoom, d.t0));
       this.cb.edit(() => { d.ev.dur = end - d.t0; this.len = d.ev.dur; }, !d.started);
@@ -313,10 +302,10 @@ export class Roll {
       if (this.sel) { this.select(null); return; }
       const t = Math.floor(this.tickAt(e.offsetX) / this.grid) * this.grid;
       const key = this.keyAt(e.offsetY), lane = this.lanes[this.lane];
-      if (lane.type === "noise" && key > LO + 15) return;
+      if (key < lane.lo || key > lane.hi) return;
       let made = null;
       this.cb.edit(song => {
-        made = lane.type === "noise" ? { t, type: "noise", v: 0xe0 + (key - LO), dur: this.len } : { t, type: "note", key, dur: this.len };
+        made = lane.make(t, key, this.len);
         addEvent(song, lane.ci, made);
       }, true);
       this.select({ ev: made, kind: "note", lane: this.lane });
@@ -366,17 +355,19 @@ export function addEvent(song, ci, ev) {
   ch.events.splice(i, 0, ev);
 }
 
-// Keeps a channel in order after an edit: sorted by tick, one note per tick (`keep` wins), long enough for its notes.
+// Keeps a channel in order after an edit: sorted by tick (other events before notes), one note of each kind per tick
+// (`keep` wins), and long enough for its notes. Notes are the events with a length (dur).
 export function tidy(song, keep) {
+  const isNote = e => e.dur !== undefined;
   for (const ch of song.channels) {
     if (!ch) continue;
-    ch.events.sort((a, b) => a.t - b.t || (a.type === "note" || a.type === "noise" ? 1 : 0) - (b.type === "note" || b.type === "noise" ? 1 : 0));
-    for (const type of ["note", "noise"]) {
+    ch.events.sort((a, b) => a.t - b.t || (isNote(a) ? 1 : 0) - (isNote(b) ? 1 : 0));
+    for (const type of new Set(ch.events.filter(isNote).map(e => e.type))) {
       const at = new Map();
       for (const e of ch.events) if (e.type === type && (!at.has(e.t) || e === keep)) at.set(e.t, e);
       ch.events = ch.events.filter(e => e.type !== type || at.get(e.t) === e);
     }
-    const last = Math.max(0, ...ch.events.filter(e => e.type === "note" || e.type === "noise").map(e => e.t + e.dur));
+    const last = Math.max(0, ...ch.events.filter(isNote).map(e => e.t + e.dur));
     if (last > ch.end) ch.end = last;
   }
 }
